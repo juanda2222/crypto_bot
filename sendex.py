@@ -3,6 +3,8 @@ import pandas as pd
 from collections import deque
 import random 
 import numpy as np
+import time
+
 
 SEQ_LEN = 60  # how long of a preceeding sequence to collect for RNN
 FUTURE_PERIOD_PREDICT = 3  # how far into the future are we trying to predict?
@@ -73,7 +75,7 @@ def preprocess_df(df):
         X.append(seq)  # X is the sequences
         y.append(target)  # y is the targets/labels (buys vs sell/notbuy)
 
-    return np.array(X), y  # return X and y...and make X a numpy array! ..import numpy as n
+    return np.array(X), np.array(y)  # return X and y...and make X a numpy array! ..import numpy as n
 
 
 # ---------------------
@@ -83,7 +85,8 @@ def preprocess_df(df):
 
 df = pd.read_csv(f"{CRYPTO_DATA_FOLDER_NAME}/LTC-USD.csv", names=['time', 'low', 'high', 'open', 'close', 'volume'])
 
-print(">>>> EXAMPLE INPUT DATA \n", df.head())
+print(">>>> EXAMPLE INPUT DATA:")
+print(df.head())
 
 
 # ---------------------------------------------------
@@ -119,7 +122,8 @@ main_df.dropna(inplace=True)
 main_df['future'] = main_df[f'{EXCHANGE_PAIR_TO_PREDICT}_close'].shift(-FUTURE_PERIOD_PREDICT)
 main_df['target'] = list(map(classify, main_df[f'{EXCHANGE_PAIR_TO_PREDICT}_close'], main_df['future']))
 
-print(">>>> RAW COMBINED DATA \n", main_df.head())
+print(">>>> RAW COMBINED DATA:")
+print(main_df.head())
 
 
 # ----------------------------------------
@@ -141,11 +145,83 @@ main_df = main_df[(main_df.index < last_5pct)]  # now the main_df is all the dat
 train_x, train_y = preprocess_df(main_df)
 validation_x, validation_y = preprocess_df(validation_main_df)
 
+print(f">>>> DATA PROCESSED RESULT: ")
+print(f"Train data elements: {len(train_x)} Validation elements: {len(validation_x)}")
+print(f"Dont buys: {list(train_y).count(0)}, buys: {list(train_y).count(1)}")
+print(f"Validations dont buys: {list(validation_y).count(0)}, Validations buys: {list(validation_y).count(1)}")
 
-# # -----------------
-# # test with output
-# # -----------------
 
-print(f"train data: {len(train_x)} validation: {len(validation_x)}")
-print(f"Dont buys: {train_y.count(0)}, buys: {train_y.count(1)}")
-print(f"VALIDATION Dont buys: {validation_y.count(0)}, buys: {validation_y.count(1)}")
+# --------------------
+# build the RNN model
+# --------------------
+
+EPOCHS = 10  # how many passes through our data
+BATCH_SIZE = 64  # how many batches? Try smaller batch if you're getting OOM (out of memory) errors.
+NAME = f"{SEQ_LEN}-SEQ-{FUTURE_PERIOD_PREDICT}-PRED-{int(time.time())}"  # a unique name for the model
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, LSTM, BatchNormalization
+from tensorflow.keras.callbacks import TensorBoard
+from tensorflow.keras.callbacks import ModelCheckpoint
+
+model = Sequential()
+model.add(LSTM(128, input_shape=(train_x.shape[1:]), return_sequences=True))
+model.add(Dropout(0.2))
+model.add(BatchNormalization())  #normalizes activation outputs, same reason you want to normalize your input data.
+
+model.add(LSTM(128, return_sequences=True))
+model.add(Dropout(0.1))
+model.add(BatchNormalization())
+
+model.add(LSTM(128))
+model.add(Dropout(0.2))
+model.add(BatchNormalization())
+
+model.add(Dense(32, activation='relu'))
+model.add(Dropout(0.2))
+
+model.add(Dense(2, activation='softmax'))
+
+opt = tf.keras.optimizers.Adam(lr=0.001, decay=1e-6)
+
+# Compile model
+model.compile(
+    loss='sparse_categorical_crossentropy',
+    optimizer=opt,
+    metrics=['accuracy']
+)
+
+
+# --------------------
+# train the RNN model
+# --------------------
+
+
+tensorboard = TensorBoard(log_dir="logs/{}".format(NAME))
+
+filepath = "RNN_Final-{epoch:02d}-{val_acc:.3f}"  # unique file name that will include the epoch and the validation acc for that epoch
+checkpoint = ModelCheckpoint("models/{}.model".format(filepath, monitor='val_acc', verbose=1, save_best_only=True, mode='max')) # saves only the best ones
+
+# Train model
+history = model.fit(
+    train_x, train_y,
+    batch_size=BATCH_SIZE,
+    epochs=EPOCHS,
+    validation_data=(validation_x, validation_y),
+    callbacks=[tensorboard, checkpoint],
+)
+
+
+# ----------------------------------------
+# evaluate and save the trained RNN model
+# ----------------------------------------
+
+# Score model
+score = model.evaluate(validation_x, validation_y, verbose=0)
+print(f">>>> RAW RNN TEST RESULT: ")
+print('Test loss:', score[0])
+print('Test accuracy:', score[1])
+
+# Save model
+model.save("models/{}".format(NAME))
